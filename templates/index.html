@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NYC Property Batch Lookup</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="card">
+    <div class="eyebrow">NYC PROPERTY RESEARCH</div>
+    <h1>批量查询地址</h1>
+    <p class="lead">上传 Excel，自动生成物业汇总表，并尝试下载 I‑Card 和 Certificate of Occupancy。</p>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    {% if result %}
+      <section class="result-panel" aria-live="polite">
+        <div class="success">
+          已完成 {{ result.record_count }} 个地址。ZIP 下载将自动开始。
+        </div>
+        <a id="result-download" class="button-link" href="{{ result.download_url }}" download>
+          再次下载 {{ result.download_name }}
+        </a>
+
+        {% if result.failed_co %}
+          <div class="failure-heading">
+            <h2>CO 下载失败（{{ result.failed_co|length }}）</h2>
+            <p class="muted">可在此页面直接重试；如果 BIS 再次阻止自动下载，请打开 BIS 手动下载。</p>
+          </div>
+          <div class="failure-list">
+            {% for failure in result.failed_co %}
+              <article class="failure-item">
+                <h3>{{ failure.address }}</h3>
+                <dl>
+                  <div><dt>BIN</dt><dd>{{ failure.bin }}</dd></div>
+                  <div><dt>状态</dt><dd>{{ failure.status }}</dd></div>
+                </dl>
+                <div class="actions">
+                  <a class="retry-link" href="{{ failure.retry_url }}">重试自动下载</a>
+                  <a class="manual-link" href="{{ failure.manual_url }}" target="_blank" rel="noopener">打开 BIS 手动下载</a>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="success-note">没有需要重试的 CO 下载。</p>
+        {% endif %}
+      </section>
+    {% endif %}
+
+    <form action="{{ url_for('process_workbook') }}" method="post" enctype="multipart/form-data">
+      <label for="workbook">Excel 文件</label>
+      <input id="workbook" name="workbook" type="file" accept=".xlsx,.xlsm" required>
+      <label for="column">地址列名</label>
+      <input id="column" name="column" type="text" value="Jobsite" required>
+      <button type="submit">开始查询并下载 ZIP</button>
+    </form>
+
+    <section>
+      <h2>输入格式</h2>
+      <p>任意工作表均可；前 50 行中需要有一列标题为 <code>Jobsite</code>，下面每行填写一个纽约市地址。</p>
+      <p class="muted">查询多个地址可能需要几分钟。请勿在处理中关闭页面。</p>
+    </section>
+  </main>
+
+  {% if result %}
+    <script>
+      window.setTimeout(function () {
+        document.getElementById("result-download").click();
+      }, 300);
+    </script>
+  {% endif %}
+</body>
+</html>
