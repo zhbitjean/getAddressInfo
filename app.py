@@ -5,6 +5,7 @@ import os
 import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from secrets import token_urlsafe
 from threading import Lock
@@ -23,6 +24,14 @@ app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", "local-only")
 _RESULT_CACHE: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
 _RESULT_LOCK = Lock()
 _MAX_CACHED_RESULTS = 5
+_LAST_QUERY: dict[str, object] | None = None
+
+
+def _timestamped_zip_name(stem: str, suffix: str, now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    timestamp = f"{current.strftime('%Y%m%d_%H%M%S')}_{current.microsecond // 1000:03d}"
+    safe_stem = secure_filename(stem) or "property"
+    return f"{safe_stem}_{suffix}_{timestamp}.zip"
 
 
 def _store_result(payload: bytes, download_name: str) -> str:
@@ -36,6 +45,17 @@ def _store_result(payload: bytes, download_name: str) -> str:
 
 def _render_result(records: list[PropertyRecord], payload: bytes, download_name: str):
     result_id = _store_result(payload, download_name)
+    download_url = url_for("download_result", result_id=result_id)
+    summary = {
+        "finished_at": datetime.now().astimezone().strftime("%Y-%m-%d %I:%M:%S %p %Z"),
+        "download_name": download_name,
+        "download_url": download_url,
+        "record_count": len(records),
+    }
+    global _LAST_QUERY
+    with _RESULT_LOCK:
+        _LAST_QUERY = summary.copy()
+
     failures = []
     for record in records:
         if not record.bin or record.co_download_status == "Downloaded":
@@ -54,17 +74,18 @@ def _render_result(records: list[PropertyRecord], payload: bytes, download_name:
     return render_template(
         "index.html",
         result={
-            "download_url": url_for("download_result", result_id=result_id),
-            "download_name": download_name,
+            **summary,
             "failed_co": failures,
-            "record_count": len(records),
         },
+        last_query=summary,
     )
 
 
 @app.get("/")
 def index():
-    return render_template("index.html")
+    with _RESULT_LOCK:
+        last_query = _LAST_QUERY.copy() if _LAST_QUERY else None
+    return render_template("index.html", last_query=last_query)
 
 
 @app.post("/process")
@@ -84,7 +105,7 @@ def process_workbook():
     if not addresses:
         return render_template("index.html", error="没有找到非空地址。"), 400
 
-    worker_count = max(1, min(int(os.environ.get("LOOKUP_WORKERS", "4")), 8))
+    worker_count = max(1, min(int(os.environ.get("LOOKUP_WORKERS", "2")), 8))
 
     def lookup_one(address: str):
         # A separate Session per worker avoids sharing mutable HTTP state.
@@ -99,7 +120,7 @@ def process_workbook():
                 documents[address] = files
 
     output = build_result_zip(records, documents, source)
-    download_name = f"{secure_filename(Path(upload.filename).stem) or 'property'}_results.zip"
+    download_name = _timestamped_zip_name(Path(upload.filename).stem, "results")
     return _render_result(records, output, download_name)
 
 
@@ -130,7 +151,7 @@ def retry_co_download():
     record, files = NYCPropertyClient().download_co(address, bin_number)
     documents = {address: files} if files else {}
     output = build_result_zip([record], documents, f"CO retry for BIN {bin_number}")
-    return _render_result([record], output, f"co_retry_{bin_number}.zip")
+    return _render_result([record], output, _timestamped_zip_name(f"co_retry_{bin_number}", "results"))
 
 
 @app.errorhandler(413)

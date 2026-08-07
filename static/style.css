@@ -36,3 +36,6 @@ code { background: #eef4f6; border-radius: 5px; padding: 2px 6px; }
 .manual-link { color: #075863; border: 1px solid #8bb9c0; background: #fff; }
 .manual-link:hover { background: #eaf5f6; }
 .success-note { margin-bottom: 0; color: #155724; }
+.query-summary, .last-query-panel { margin: 14px 0 18px; padding: 14px 16px; border: 1px solid #b9d9df; border-radius: 10px; background: #fff; }
+.query-summary p, .last-query-panel p { margin: 5px 0; }
+.query-summary code, .last-query-panel code { overflow-wrap: anywhere; }

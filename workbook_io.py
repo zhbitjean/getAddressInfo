@@ -26,9 +26,7 @@ DETAIL_COLUMNS = [
     ("Landmark Status", "landmark_status"),
     ("Families", "families"),
     ("Violations", "violations"),
-    ("CO", "co"),
     ("CO Date", "co_date"),
-    ("Historical Image Cards", "historical_image_cards"),
     ("Historical Image Cards Date", "historical_image_cards_date"),
     ("Land Use", "land_use"),
     ("Lot Area (sq ft)", "lot_area"),
@@ -51,9 +49,7 @@ REPORT_ROWS = [
     ("Landmark Status", "landmark_status"),
     ("Families", "families"),
     ("Violations", "violations"),
-    ("CO", "co"),
     ("CO date", "co_date"),
-    ("Historical Image cards", "historical_image_cards"),
     ("Historical Image cards date", "historical_image_cards_date"),
     ("Land Use", "land_use"),
     ("Lot Area", "lot_area"),
@@ -75,12 +71,27 @@ def read_addresses(content: bytes, requested_column: str = "Jobsite") -> tuple[l
     try:
         workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:
-        raise ValueError(f"无法读取 Excel：{exc}") from exc
+        raise ValueError(f"Unable to read Excel workbook: {exc}") from exc
+
+    current_input = next(
+        (sheet for sheet in workbook.worksheets if sheet.title.strip().casefold() == "current_input"),
+        None,
+    )
+    if current_input is not None:
+        candidate_sheets = [current_input]
+    elif len(workbook.worksheets) == 1:
+        # Keep compatibility with older input files that contain one worksheet.
+        candidate_sheets = list(workbook.worksheets)
+    else:
+        raise ValueError(
+            'This workbook has multiple tabs but no "current_input" tab. '
+            'Rename the worksheet containing the current jobs to "current_input".'
+        )
 
     target = (requested_column or "Jobsite").strip().casefold()
-    for sheet in workbook.worksheets:
+    for sheet in candidate_sheets:
         # Some Google Sheets exports omit the worksheet dimension metadata, so
-        # openpyxl reports max_row/max_column as None.  Limit the iterator
+        # openpyxl reports max_row/max_column as None. Limit the iterator
         # directly instead of relying on those optional metadata values.
         preview_rows = itertools.islice(sheet.iter_rows(min_row=1, values_only=True), 50)
         for row_number, row in enumerate(preview_rows, start=1):
@@ -89,13 +100,22 @@ def read_addresses(content: bytes, requested_column: str = "Jobsite") -> tuple[l
                 column_number = headers.index(target) + 1
                 addresses = []
                 seen = set()
-                for values in sheet.iter_rows(min_row=row_number + 1, min_col=column_number, max_col=column_number, values_only=True):
+                for values in sheet.iter_rows(
+                    min_row=row_number + 1,
+                    min_col=column_number,
+                    max_col=column_number,
+                    values_only=True,
+                ):
                     value = str(values[0]).strip() if values[0] is not None else ""
                     if value and value.casefold() not in seen:
                         seen.add(value.casefold())
                         addresses.append(value)
                 return addresses, f"{sheet.title}!{get_column_letter(column_number)}{row_number}"
-    raise ValueError(f"前 50 行中找不到列名“{requested_column or 'Jobsite'}”。")
+
+    raise ValueError(
+        f'Column "{requested_column or "Jobsite"}" was not found in the first 50 rows '
+        f'of worksheet "{candidate_sheets[0].title}".'
+    )
 
 
 def _safe_folder(address: str, index: int) -> str:

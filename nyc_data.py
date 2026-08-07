@@ -10,6 +10,8 @@ from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from building_classes import format_building_class
 
@@ -17,6 +19,7 @@ from building_classes import format_building_class
 GEOSEARCH_URL = "https://geosearch.planninglabs.nyc/v2/search"
 PLUTO_URL = "https://data.cityofnewyork.us/resource/64uk-42ks.json"
 HPD_BUILDINGS_URL = "https://data.cityofnewyork.us/resource/kj4p-ruqc.json"
+BUILDING_FOOTPRINTS_URL = "https://data.cityofnewyork.us/resource/5zhs-2jue.json"
 HPD_VIOLATIONS_URL = "https://data.cityofnewyork.us/resource/wvxf-dwi5.json"
 LEGACY_CO_URL = "https://a810-bisweb.nyc.gov/bisweb/COsByLocationServlet"
 LEGACY_CO_POST_URL = "https://a810-bisweb.nyc.gov/bisweb/CofoJobDocumentServlet"
@@ -56,11 +59,11 @@ class PropertyRecord:
     families: str = ""
     violations: str = ""
     co: str = "No"
-    co_date: str = ""
+    co_date: str = "No"
     co_download_status: str = "Not attempted"
     co_retry_url: str = ""
     historical_image_cards: str = "No"
-    historical_image_cards_date: str = ""
+    historical_image_cards_date: str = "No"
     land_use: str = ""
     lot_area: str = ""
     lot_frontage: str = ""
@@ -81,9 +84,28 @@ class PropertyRecord:
 
 class NYCPropertyClient:
     def __init__(self, session: requests.Session | None = None, timeout: int = 25):
-        self.session = session or requests.Session()
+        self.session = session or self._retrying_session()
         self.session.headers.update({"User-Agent": "getAddressInfo/1.0 (local property research tool)"})
         self.timeout = timeout
+
+    @staticmethod
+    def _retrying_session() -> requests.Session:
+        session = requests.Session()
+        retry = Retry(
+            total=3,
+            connect=3,
+            read=3,
+            status=3,
+            other=0,
+            backoff_factor=0.75,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=8, pool_maxsize=8)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def _json(self, url: str, params: dict[str, Any]) -> Any:
         response = self.session.get(url, params=params, timeout=self.timeout)
@@ -107,6 +129,7 @@ class NYCPropertyClient:
             boro, block, lot = bbl[0], str(int(bbl[1:6])), str(int(bbl[6:10]))
             data = self._pluto(boro, block, lot)
             self._apply_pluto(record, data)
+            self._add_bin_from_footprints(record)
             record.dob_url = (
                 f"https://a810-bisweb.nyc.gov/bisweb/PropertyProfileOverviewServlet?"
                 f"bin={record.bin}&go4=+GO+&requestid=0" if record.bin else DOB_NOW_PUBLIC_URL
@@ -119,11 +142,65 @@ class NYCPropertyClient:
         return record, files
 
     def _geocode(self, address: str) -> dict[str, Any]:
-        data = self._json(GEOSEARCH_URL, {"text": address})
-        features = data.get("features") or []
-        if not features:
-            raise ValueError("无法解析地址")
-        return features[0]
+        pluto_error: Exception | None = None
+        try:
+            return self._geocode_with_pluto(address)
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            pluto_error = exc
+
+        try:
+            data = self._json(GEOSEARCH_URL, {"text": address})
+            features = data.get("features") or []
+            if features:
+                return features[0]
+            raise ValueError("GeoSearch could not resolve the address")
+        except (requests.RequestException, ValueError, KeyError, TypeError) as geosearch_error:
+            raise ValueError(
+                f"MapPLUTO exact match failed ({pluto_error}); GeoSearch failed ({geosearch_error})"
+            ) from geosearch_error
+
+    def _geocode_with_pluto(self, address: str) -> dict[str, Any]:
+        street_address, zipcode = self._address_and_zip(address)
+        escaped_address = street_address.replace("'", "''")
+        where = f"upper(address)='{escaped_address}'"
+        if zipcode:
+            where += f" AND zipcode='{zipcode}'"
+        rows = self._json(PLUTO_URL, {"$where": where, "$limit": 10})
+        if not rows:
+            raise ValueError("MapPLUTO could not find an exact address match")
+        row = rows[0]
+        bbl = str(row.get("bbl") or "").split(".", 1)[0].zfill(10)
+        if not re.fullmatch(r"\d{10}", bbl):
+            boro = str(row.get("borocode") or "")
+            block = str(row.get("block") or "").zfill(5)
+            lot = str(row.get("lot") or "").zfill(4)
+            bbl = f"{boro}{block}{lot}"
+        if not re.fullmatch(r"\d{10}", bbl):
+            raise ValueError("MapPLUTO did not return a valid 10-digit BBL")
+        return {
+            "properties": {
+                "label": row.get("address") or street_address,
+                "bbl": bbl,
+                "bin": row.get("bin") or "",
+                "addendum": {"pad": {"bbl": bbl, "bin": row.get("bin") or ""}},
+            }
+        }
+
+    @staticmethod
+    def _address_and_zip(address: str) -> tuple[str, str]:
+        street_address = address.split(",", 1)[0].strip().upper()
+        street_address = re.sub(r"\b(\d+)(ST|ND|RD|TH)\b", r"\1", street_address)
+        suffixes = {
+            "ST": "STREET", "AVE": "AVENUE", "AV": "AVENUE",
+            "RD": "ROAD", "BLVD": "BOULEVARD", "DR": "DRIVE",
+            "PL": "PLACE", "CT": "COURT", "PKWY": "PARKWAY",
+            "TER": "TERRACE", "LN": "LANE", "HWY": "HIGHWAY",
+        }
+        words = street_address.split()
+        if words and words[-1] in suffixes:
+            words[-1] = suffixes[words[-1]]
+        zipcode_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", address)
+        return " ".join(words), zipcode_match.group(1) if zipcode_match else ""
 
     def _pluto(self, boro: str, block: str, lot: str) -> dict[str, Any]:
         rows = self._json(
@@ -156,6 +233,20 @@ class NYCPropertyClient:
             str(data.get(key)) for key in ("zonedist1", "zonedist2", "zonedist3", "zonedist4") if data.get(key)
         )
 
+    def _add_bin_from_footprints(self, record: PropertyRecord) -> None:
+        if record.bin or not record.bbl:
+            return
+        try:
+            rows = self._json(
+                BUILDING_FOOTPRINTS_URL,
+                {"$where": f"base_bbl='{record.bbl}'", "$limit": 10},
+            )
+            record.bin = next(
+                (str(row.get("bin") or "").strip() for row in rows if row.get("bin")),
+                "",
+            )
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            record.notes.append("NYC Building Footprints BIN lookup failed")
     def _add_hpd(
         self,
         record: PropertyRecord,
@@ -167,6 +258,16 @@ class NYCPropertyClient:
         where = f"boroid={int(boro)} AND block={int(block)} AND lot={int(lot)}"
         try:
             buildings = self._json(HPD_BUILDINGS_URL, {"$where": where, "$limit": 5})
+            if not record.bin and isinstance(buildings, list):
+                record.bin = next(
+                    (str(building.get("bin") or "").strip() for building in buildings if building.get("bin")),
+                    "",
+                )
+                if record.bin:
+                    record.dob_url = (
+                        "https://a810-bisweb.nyc.gov/bisweb/PropertyProfileOverviewServlet?"
+                        f"bin={record.bin}&go4=+GO+&requestid=0"
+                    )
             violations = self._json(
                 HPD_VIOLATIONS_URL,
                 {"$select": "count(*) as total", "$where": where, "$limit": 1},
@@ -185,7 +286,7 @@ class NYCPropertyClient:
                     _source_name, content, card_date = downloaded
                     files.append((self._i_card_output_filename(record), content))
                     record.historical_image_cards = "Yes"
-                    record.historical_image_cards_date = card_date or "Available"
+                    record.historical_image_cards_date = card_date or "No"
                     return
 
             # Retain the legacy route as a fallback for older/mirrored records.
@@ -204,7 +305,7 @@ class NYCPropertyClient:
                     if content:
                         files.append((self._i_card_output_filename(record), content))
                         record.historical_image_cards = "Yes"
-                        record.historical_image_cards_date = "Available"
+                        record.historical_image_cards_date = "No"
                         return
         except (requests.RequestException, ValueError, KeyError, TypeError):
             record.notes.append("HPD/I-Card 查询失败；请使用 HPD 链接人工复核")

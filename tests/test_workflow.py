@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import zipfile
+import pytest
 import app as app_module
+from datetime import datetime
 from requests.structures import CaseInsensitiveDict
 
 from openpyxl import Workbook, load_workbook
@@ -10,8 +12,10 @@ from openpyxl import Workbook, load_workbook
 from building_classes import BUILDING_CLASS_DESCRIPTIONS, format_building_class
 
 from nyc_data import (
+    BUILDING_FOOTPRINTS_URL,
     HPD_BUILDINGS_URL,
     HPD_VIOLATIONS_URL,
+    GEOSEARCH_URL,
     LEGACY_CO_CONTENT_URL,
     LEGACY_CO_POST_URL,
     LEGACY_CO_URL,
@@ -40,6 +44,62 @@ def test_read_addresses():
     assert addresses[0].startswith("35 EUCLID")
     assert source == "Input!A1"
 
+
+def test_read_addresses_uses_current_input_and_ignores_dated_tabs():
+    workbook = Workbook()
+    dated = workbook.active
+    dated.title = "20260805"
+    dated.append(["Jobsite"])
+    dated.append(["OLD ADDRESS"])
+    current = workbook.create_sheet("current_input")
+    current.append(["Jobsite", "Measurement Date"])
+    current.append(["643 Shepherd Ave, Brooklyn, NY 11208", "08/06/2026"])
+    current.append(["191 19th St, Brooklyn, NY 11232", "08/06/2026"])
+    workbook.create_sheet("20260804").append(["Jobsite"])
+    output = io.BytesIO()
+    workbook.save(output)
+
+    addresses, source = read_addresses(output.getvalue())
+
+    assert addresses == [
+        "643 Shepherd Ave, Brooklyn, NY 11208",
+        "191 19th St, Brooklyn, NY 11232",
+    ]
+    assert source == "current_input!A1"
+
+
+def test_multitab_workbook_requires_current_input_tab():
+    workbook = Workbook()
+    workbook.active.title = "20260805"
+    workbook.active.append(["Jobsite"])
+    workbook.active.append(["OLD ADDRESS"])
+    workbook.create_sheet("20260804").append(["Jobsite"])
+    output = io.BytesIO()
+    workbook.save(output)
+
+    with pytest.raises(ValueError, match="current_input"):
+        read_addresses(output.getvalue())
+
+def test_default_http_session_retries_transient_get_failures():
+    client = NYCPropertyClient()
+    retry = client.session.get_adapter("https://").max_retries
+
+    assert retry.total == 3
+    assert retry.read == 3
+    assert retry.connect == 3
+    assert 429 in retry.status_forcelist
+    assert 503 in retry.status_forcelist
+    assert retry.allowed_methods == frozenset({"GET"})
+
+
+def test_output_zip_name_contains_timestamp():
+    name = app_module._timestamped_zip_name(
+        "My Input",
+        "results",
+        datetime(2026, 8, 7, 14, 5, 9),
+    )
+
+    assert name == "My_Input_results_20260807_140509_000.zip"
 
 def test_result_zip_contains_workbook_and_documents():
     record = PropertyRecord(
@@ -138,6 +198,8 @@ def test_main_page_displays_failed_co_and_serves_result_zip():
     assert "重试自动下载" in page
     assert "打开 BIS 手动下载" in page
     assert "retry_failed_co_downloads.html" not in page
+    assert "Last query finished at:" in page
+    assert "input_results_" in page
 
     import re
     match = re.search(r'href="(/download-result/[^"]+)"', page)
@@ -147,6 +209,11 @@ def test_main_page_displays_failed_co_and_serves_result_zip():
     with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
         assert "failed_co_downloads.csv" in archive.namelist()
         assert "retry_failed_co_downloads.html" not in archive.namelist()
+
+    home_page = client.get("/").get_data(as_text=True)
+    assert "Last completed query" in home_page
+    assert "Download this ZIP again" in home_page
+    assert "input_results_" in home_page
 
 def test_co_download_fields_are_the_last_two_workbook_rows():
     assert DETAIL_COLUMNS[-2:] == [
@@ -158,6 +225,18 @@ def test_co_download_fields_are_the_last_two_workbook_rows():
         ("CO retry URL", "co_retry_url"),
     ]
 
+
+def test_boolean_document_rows_are_removed_and_missing_dates_show_no():
+    detail_keys = [key for _label, key in DETAIL_COLUMNS]
+    report_keys = [key for _label, key in REPORT_ROWS]
+    record = PropertyRecord(input_address="TEST")
+
+    assert "co" not in detail_keys
+    assert "historical_image_cards" not in detail_keys
+    assert "co" not in report_keys
+    assert "historical_image_cards" not in report_keys
+    assert record.co_date == "No"
+    assert record.historical_image_cards_date == "No"
 
 def test_official_building_class_mapping_is_complete_and_readable():
     assert len(BUILDING_CLASS_DESCRIPTIONS) >= 220
@@ -206,6 +285,93 @@ def test_pluto_building_class_code_is_expanded():
     NYCPropertyClient._apply_pluto(record, {"bldgclass": "B1"})
 
     assert record.building_class == "Two Family Dwellings - Brick (B1)"
+
+def test_address_normalization_for_exact_pluto_lookup():
+    normalize = NYCPropertyClient._address_and_zip
+
+    assert normalize("571 Leonard St, Brooklyn, NY 11222") == ("571 LEONARD STREET", "11222")
+    assert normalize("191 19th St, Brooklyn, NY 11232") == ("191 19 STREET", "11232")
+
+
+def test_geocode_prefers_exact_pluto_address_and_normalizes_bbl():
+    client = NYCPropertyClient()
+    calls = []
+
+    def fake_json(url, params):
+        calls.append((url, params))
+        assert url == PLUTO_URL
+        return [{
+            "address": "22 EAST 13 STREET",
+            "bbl": "1005700055.00000000",
+            "bin": "1000001",
+        }]
+
+    client._json = fake_json
+
+    feature = client._geocode("22 East 13 St, New York, NY 10003")
+
+    assert feature["properties"]["label"] == "22 EAST 13 STREET"
+    assert feature["properties"]["bbl"] == "1005700055"
+    assert calls == [(
+        PLUTO_URL,
+        {"$where": "upper(address)='22 EAST 13 STREET' AND zipcode='10003'", "$limit": 10},
+    )]
+
+
+def test_geocode_uses_geosearch_when_pluto_has_no_exact_match():
+    client = NYCPropertyClient()
+    calls = []
+
+    def fake_json(url, params):
+        calls.append(url)
+        if url == PLUTO_URL:
+            return []
+        assert url == GEOSEARCH_URL
+        return {"features": [{"properties": {"label": "FUZZY MATCH"}}]}
+
+    client._json = fake_json
+
+    feature = client._geocode("Unusual address without ZIP")
+
+    assert feature["properties"]["label"] == "FUZZY MATCH"
+    assert calls == [PLUTO_URL, GEOSEARCH_URL]
+
+
+def test_building_footprints_supplies_bin_when_pluto_omits_it():
+    client = NYCPropertyClient()
+    record = PropertyRecord(
+        input_address="191 19th St, Brooklyn, NY 11232",
+        bbl="3006340069",
+    )
+    captured = {}
+
+    def fake_json(url, params):
+        captured.update(url=url, params=params)
+        return [{"bin": "3009112", "base_bbl": "3006340069"}]
+
+    client._json = fake_json
+    client._add_bin_from_footprints(record)
+
+    assert record.bin == "3009112"
+    assert captured == {
+        "url": BUILDING_FOOTPRINTS_URL,
+        "params": {"$where": "base_bbl='3006340069'", "$limit": 10},
+    }
+
+def test_hpd_supplies_bin_when_pluto_does_not():
+    client = NYCPropertyClient()
+    record = PropertyRecord(input_address="571 Leonard St, Brooklyn, NY 11222")
+
+    client._json = lambda url, _params: (
+        [{"buildingid": "", "bin": "3065517"}]
+        if url == HPD_BUILDINGS_URL
+        else [{"total": "0"}]
+    )
+
+    client._add_hpd(record, "3", "2647", "27", [])
+
+    assert record.bin == "3065517"
+    assert "bin=3065517" in record.dob_url
 
 def test_pluto_query_uses_numeric_bbl_fields():
     client = NYCPropertyClient()

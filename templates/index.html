@@ -19,6 +19,10 @@
         <div class="success">
           已完成 {{ result.record_count }} 个地址。ZIP 下载将自动开始。
         </div>
+        <div class="query-summary">
+          <p><strong>Last query finished at:</strong> {{ result.finished_at }}</p>
+          <p><strong>ZIP file:</strong> <code>{{ result.download_name }}</code></p>
+        </div>
         <a id="result-download" class="button-link" href="{{ result.download_url }}" download>
           再次下载 {{ result.download_name }}
         </a>
@@ -46,6 +50,18 @@
         {% else %}
           <p class="success-note">没有需要重试的 CO 下载。</p>
         {% endif %}
+      </section>
+    {% endif %}
+
+    {% if last_query and not result %}
+      <section class="last-query-panel" aria-live="polite">
+        <h2>Last completed query</h2>
+        <p><strong>Finished at:</strong> {{ last_query.finished_at }}</p>
+        <p><strong>ZIP file:</strong> <code>{{ last_query.download_name }}</code></p>
+        <p><strong>Addresses:</strong> {{ last_query.record_count }}</p>
+        <a class="button-link" href="{{ last_query.download_url }}" download>
+          Download this ZIP again
+        </a>
       </section>
     {% endif %}
 
