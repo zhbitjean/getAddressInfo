@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 import pytest
 import app as app_module
@@ -159,12 +160,14 @@ def test_result_zip_lists_failed_co_and_retry_links():
         assert "1015548" in csv_text
         assert "/retry-co?" in csv_text
 
-def test_main_page_displays_failed_co_and_serves_result_zip():
+def test_fastapi_process_returns_result_zip_in_same_request():
+    from fastapi.testclient import TestClient
+
     original_client = app_module.NYCPropertyClient
 
     class FakeClient:
         def lookup(self, address):
-            record = PropertyRecord(
+            return PropertyRecord(
                 input_address=address,
                 matched_address=address,
                 bin="1015548",
@@ -174,46 +177,37 @@ def test_main_page_displays_failed_co_and_serves_result_zip():
                     "https://a810-bisweb.nyc.gov/bisweb/"
                     "COsByLocationServlet?requestid=2&allbin=1015548"
                 ),
-            )
-            return record, []
+            ), []
 
     app_module.NYCPropertyClient = FakeClient
     try:
-        client = app_module.app.test_client()
+        client = TestClient(app_module.app)
         response = client.post(
-            "/process",
-            data={
-                "workbook": (io.BytesIO(make_input()), "input.xlsx"),
-                "column": "Jobsite",
-            },
-            content_type="multipart/form-data",
+            "/api/process",
+            files={"workbook": ("input.xlsx", make_input(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            data={"column": "Jobsite"},
+        )
+        preview_response = client.post(
+            "/api/process",
+            files={"workbook": ("input.xlsx", make_input(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            data={"column": "Jobsite", "preview": "true"},
         )
     finally:
         app_module.NYCPropertyClient = original_client
 
     assert response.status_code == 200
-    page = response.get_data(as_text=True)
-    assert "CO 下载失败（2）" in page
-    assert "BIS access denied" in page
-    assert "重试自动下载" in page
-    assert "打开 BIS 手动下载" in page
-    assert "retry_failed_co_downloads.html" not in page
-    assert "Last query finished at:" in page
-    assert "input_results_" in page
-
-    import re
-    match = re.search(r'href="(/download-result/[^"]+)"', page)
-    assert match
-    download = client.get(match.group(1))
-    assert download.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(download.data)) as archive:
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert "property_results.xlsx" in archive.namelist()
         assert "failed_co_downloads.csv" in archive.namelist()
-        assert "retry_failed_co_downloads.html" not in archive.namelist()
-
-    home_page = client.get("/").get_data(as_text=True)
-    assert "Last completed query" in home_page
-    assert "Download this ZIP again" in home_page
-    assert "input_results_" in home_page
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "application/vnd.getaddressinfo.result"
+    assert preview_response.content[:4] == b"GAI1"
+    metadata_length = int.from_bytes(preview_response.content[4:8], "big")
+    metadata = json.loads(preview_response.content[8:8 + metadata_length])
+    assert metadata["records"][0]["matched_address"] == "35 EUCLID AVENUE, Brooklyn, NY, 11208"
+    with zipfile.ZipFile(io.BytesIO(preview_response.content[8 + metadata_length:])) as archive:
+        assert "property_results.xlsx" in archive.namelist()
 
 def test_co_download_fields_are_the_last_two_workbook_rows():
     assert DETAIL_COLUMNS[-2:] == [

@@ -202,6 +202,7 @@ def build_result_zip(
     records: list[PropertyRecord],
     documents: dict[str, list[tuple[str, bytes]]],
     source: str,
+    retry_base_url: str = "http://127.0.0.1:8000",
 ) -> bytes:
     output = io.BytesIO()
     failed_co_records: list[PropertyRecord] = []
@@ -232,7 +233,7 @@ def build_result_zip(
             writer = csv.writer(report)
             writer.writerow(["Input Address", "BIN", "Status", "Manual BIS URL", "Local Retry URL"])
             for record in failed_co_records:
-                retry_url = "http://127.0.0.1:5000/retry-co?" + urlencode({
+                retry_url = retry_base_url.rstrip("/") + "/retry-co?" + urlencode({
                     "bin": record.bin,
                     "address": record.input_address,
                 })

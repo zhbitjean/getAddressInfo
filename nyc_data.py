@@ -117,6 +117,9 @@ class NYCPropertyClient:
         files: list[tuple[str, bytes]] = []
         try:
             feature = self._geocode(address)
+            lookup_variant = str(feature.pop("_lookup_address_variant", address))
+            if lookup_variant.casefold() != address.strip().casefold():
+                record.notes.append(f"Address matched after normalization: {lookup_variant}")
             props = feature["properties"]
             pad = props.get("addendum", {}).get("pad", {})
             bbl = str(pad.get("bbl") or props.get("bbl") or "")
@@ -142,6 +145,17 @@ class NYCPropertyClient:
         return record, files
 
     def _geocode(self, address: str) -> dict[str, Any]:
+        errors: list[str] = []
+        for candidate in self._address_variants(address):
+            try:
+                feature = self._geocode_candidate(candidate)
+                feature["_lookup_address_variant"] = candidate
+                return feature
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                errors.append(f"{candidate}: {exc}")
+        raise ValueError("Address lookup failed after trying: " + " | ".join(errors))
+
+    def _geocode_candidate(self, address: str) -> dict[str, Any]:
         pluto_error: Exception | None = None
         try:
             return self._geocode_with_pluto(address)
@@ -158,6 +172,25 @@ class NYCPropertyClient:
             raise ValueError(
                 f"MapPLUTO exact match failed ({pluto_error}); GeoSearch failed ({geosearch_error})"
             ) from geosearch_error
+
+    @staticmethod
+    def _address_variants(address: str) -> list[str]:
+        """Return conservative NYC house-number fallbacks, original first."""
+        cleaned = " ".join(address.strip().split())
+        variants = [cleaned]
+        match = re.match(r"^(\d{1,3})-(\d{1,3})(\s+.+)$", cleaned)
+        if not match:
+            return variants
+
+        left, right, remainder = match.groups()
+        compact = f"{left}{right}{remainder}"
+        padded = f"{left.zfill(2)}-{right.zfill(2)}{remainder}"
+        seen = {cleaned.casefold()}
+        for candidate in (compact, padded):
+            if candidate.casefold() not in seen:
+                variants.append(candidate)
+                seen.add(candidate.casefold())
+        return variants
 
     def _geocode_with_pluto(self, address: str) -> dict[str, Any]:
         street_address, zipcode = self._address_and_zip(address)

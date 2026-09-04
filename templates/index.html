@@ -1,91 +1,24 @@
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NYC Property Batch Lookup</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-  <main class="card">
-    <div class="eyebrow">NYC PROPERTY RESEARCH</div>
-    <h1>批量查询地址</h1>
-    <p class="lead">上传 Excel，自动生成物业汇总表，并尝试下载 I‑Card 和 Certificate of Occupancy。</p>
-
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
-
-    {% if result %}
-      <section class="result-panel" aria-live="polite">
-        <div class="success">
-          已完成 {{ result.record_count }} 个地址。ZIP 下载将自动开始。
-        </div>
-        <div class="query-summary">
-          <p><strong>Last query finished at:</strong> {{ result.finished_at }}</p>
-          <p><strong>ZIP file:</strong> <code>{{ result.download_name }}</code></p>
-        </div>
-        <a id="result-download" class="button-link" href="{{ result.download_url }}" download>
-          再次下载 {{ result.download_name }}
-        </a>
-
-        {% if result.failed_co %}
-          <div class="failure-heading">
-            <h2>CO 下载失败（{{ result.failed_co|length }}）</h2>
-            <p class="muted">可在此页面直接重试；如果 BIS 再次阻止自动下载，请打开 BIS 手动下载。</p>
-          </div>
-          <div class="failure-list">
-            {% for failure in result.failed_co %}
-              <article class="failure-item">
-                <h3>{{ failure.address }}</h3>
-                <dl>
-                  <div><dt>BIN</dt><dd>{{ failure.bin }}</dd></div>
-                  <div><dt>状态</dt><dd>{{ failure.status }}</dd></div>
-                </dl>
-                <div class="actions">
-                  <a class="retry-link" href="{{ failure.retry_url }}">重试自动下载</a>
-                  <a class="manual-link" href="{{ failure.manual_url }}" target="_blank" rel="noopener">打开 BIS 手动下载</a>
-                </div>
-              </article>
-            {% endfor %}
-          </div>
-        {% else %}
-          <p class="success-note">没有需要重试的 CO 下载。</p>
-        {% endif %}
-      </section>
-    {% endif %}
-
-    {% if last_query and not result %}
-      <section class="last-query-panel" aria-live="polite">
-        <h2>Last completed query</h2>
-        <p><strong>Finished at:</strong> {{ last_query.finished_at }}</p>
-        <p><strong>ZIP file:</strong> <code>{{ last_query.download_name }}</code></p>
-        <p><strong>Addresses:</strong> {{ last_query.record_count }}</p>
-        <a class="button-link" href="{{ last_query.download_url }}" download>
-          Download this ZIP again
-        </a>
-      </section>
-    {% endif %}
-
-    <form action="{{ url_for('process_workbook') }}" method="post" enctype="multipart/form-data">
-      <label for="workbook">Excel 文件</label>
-      <input id="workbook" name="workbook" type="file" accept=".xlsx,.xlsm" required>
-      <label for="column">地址列名</label>
-      <input id="column" name="column" type="text" value="Jobsite" required>
-      <button type="submit">开始查询并下载 ZIP</button>
-    </form>
-
-    <section>
-      <h2>输入格式</h2>
-      <p>任意工作表均可；前 50 行中需要有一列标题为 <code>Jobsite</code>，下面每行填写一个纽约市地址。</p>
-      <p class="muted">查询多个地址可能需要几分钟。请勿在处理中关闭页面。</p>
-    </section>
-  </main>
-
-  {% if result %}
-    <script>
-      window.setTimeout(function () {
-        document.getElementById("result-download").click();
-      }, 300);
-    </script>
-  {% endif %}
-</body>
-</html>
+<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="批量查询纽约市物业资料并下载 Excel、I-Card 和 CO 文件。">
+<title>NYC Property Batch Lookup</title><link rel="stylesheet" href="/static/style.css">
+</head><body><main class="shell">
+<header><div class="eyebrow">NYC PROPERTY RESEARCH</div><h1>批量查询地址</h1>
+<p class="lead">上传 Excel，服务器完成查询后直接返回物业结果、I‑Card 和可取得的 CO 文件。</p></header>
+<section class="workspace"><form id="lookup-form"><input type="hidden" name="preview" value="true">
+<label><span>Excel 文件</span><input name="workbook" type="file" accept=".xlsx,.xlsm" required><small>支持 .xlsx / .xlsm，最大 20 MB</small></label>
+<label><span>地址列名</span><input name="column" type="text" value="Jobsite" required><small>程序会在前 50 行寻找这个标题</small></label>
+<button id="submit" type="submit">开始查询</button></form>
+<div id="message" class="message" hidden role="alert"></div>
+<section id="progress" class="progress-panel" hidden aria-live="polite">
+<div class="progress-heading"><div><span class="status-label">查询状态</span><strong id="progress-text">查询进行中…</strong></div><span>Cloud Run</span></div>
+<div class="track"><div class="indeterminate"></div></div><p id="note">请保持此页面开启。完成后浏览器会自动下载 ZIP。</p>
+<a id="download" class="download" hidden>再次下载结果 ZIP</a></section></section>
+<section id="results" class="results" hidden><div class="results-heading"><div><span class="status-label">查询结果</span><h2>物业资料</h2></div><span id="results-count"></span></div><div id="result-list" class="result-list"></div></section>
+<aside><h2>输入格式</h2><p>工作簿需要有一列标题为 <code>Jobsite</code>，每行填写一个纽约市地址。错误会写进结果文件，不会中断整批查询。</p></aside>
+</main><script>
+const q=s=>document.querySelector(s),form=q('#lookup-form'),button=q('#submit'),message=q('#message'),panel=q('#progress'),statusText=q('#progress-text'),note=q('#note'),download=q('#download'),results=q('#results'),resultList=q('#result-list'),resultsCount=q('#results-count');
+function fail(value){message.textContent=value;message.className='message error';message.hidden=false;button.disabled=false;button.textContent='重新尝试';statusText.textContent='查询未完成';note.textContent='请根据错误提示修改输入后重试。'}
+function render(records){const fields=[['Matched Address','matched_address'],['Borough','borough'],['Block / Lot','block_lot'],['BIN','bin'],['Landmark','landmark_status'],['Land Use','land_use'],['Lot Area','lot_area'],['Year Built','year_built'],['Building Class','building_class'],['CO Download','co_download_status']];resultList.innerHTML='';for(const record of records){const card=document.createElement('article');card.className='result-card';const title=document.createElement('h3');title.textContent=record.input_address||'Address';card.appendChild(title);const grid=document.createElement('dl');for(const [label,key] of fields){let value=key==='block_lot'?[record.block,record.lot].filter(Boolean).join(' / '):record[key];if(value===null||value===undefined||value==='')value='—';const dt=document.createElement('dt'),dd=document.createElement('dd');dt.textContent=label;dd.textContent=String(value);grid.append(dt,dd)}card.appendChild(grid);if(record.error){const error=document.createElement('p');error.className='record-error';error.textContent=record.error;card.appendChild(error)}resultList.appendChild(card)}resultsCount.textContent=`${records.length} 个地址`;results.hidden=false;results.scrollIntoView({behavior:'smooth',block:'start'})}
+form.addEventListener('submit',async event=>{event.preventDefault();message.hidden=true;download.hidden=true;results.hidden=true;panel.hidden=false;button.disabled=true;button.textContent='查询进行中…';statusText.textContent='服务器正在查询 NYC 数据…';note.textContent='请保持此页面开启。完成后浏览器会自动下载 ZIP。';try{const response=await fetch('/api/process',{method:'POST',body:new FormData(form)});if(!response.ok){let detail='查询失败';try{detail=(await response.json()).detail||detail}catch{}throw Error(detail)}const bytes=new Uint8Array(await response.arrayBuffer());if(new TextDecoder().decode(bytes.slice(0,4))!=='GAI1')throw Error('服务器返回格式不正确');const metadataLength=new DataView(bytes.buffer,bytes.byteOffset+4,4).getUint32(0),metadata=JSON.parse(new TextDecoder().decode(bytes.slice(8,8+metadataLength))),blob=new Blob([bytes.slice(8+metadataLength)],{type:'application/zip'}),url=URL.createObjectURL(blob);download.href=url;download.download=metadata.filename||'property_results.zip';download.hidden=false;download.click();render(metadata.records);statusText.textContent='查询完成';note.textContent='结果显示在下方，ZIP 也已生成。';button.disabled=false;button.textContent='开始新查询'}catch(error){fail(error.message||'发生未知错误')}});
+</script></body></html>
