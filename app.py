@@ -1,10 +1,10 @@
 from __future__ import annotations
-import io, os, re, tempfile, zipfile
+import io, json, os, re, tempfile, zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
@@ -31,7 +31,8 @@ def _process(addresses,source,retry_base_url):
         for address,(record,files) in zip(addresses,pool.map(lambda value:NYCPropertyClient().lookup(value),addresses)):
             records.append(record)
             if files: documents[address]=files
-    return build_result_zip(records,documents,source,retry_base_url=retry_base_url)
+    payload = build_result_zip(records,documents,source,retry_base_url=retry_base_url)
+    return records, payload
 
 @app.get("/",response_class=HTMLResponse)
 def index(request:Request):
@@ -75,7 +76,7 @@ def health():
     return {"status":"ok","service":"getAddressInfo","runtime":"cloud-run"}
 
 @app.post("/api/process")
-async def process_workbook(request:Request,workbook:UploadFile=File(...),column:str=Form("Jobsite")):
+async def process_workbook(request:Request,workbook:UploadFile=File(...),column:str=Form("Jobsite"),preview:bool=Form(False)):
     filename=workbook.filename or "input.xlsx"
     if Path(filename).suffix.lower() not in {".xlsx",".xlsm"}:
         raise HTTPException(400,"目前只支持 .xlsx 或 .xlsm 文件")
@@ -91,7 +92,12 @@ async def process_workbook(request:Request,workbook:UploadFile=File(...),column:
 
     # Cloud Run request-based CPU can pause after a response ends. Keep the
     # complete lookup inside this request instead of using detached threads.
-    payload=_process(addresses,source,str(request.base_url))
+    records,payload=_process(addresses,source,str(request.base_url))
+    result_filename=_timestamped_zip_name(Path(filename).stem,"results")
+    if preview:
+        metadata=json.dumps({"filename":result_filename,"records":[record.as_dict() for record in records]},ensure_ascii=False).encode("utf-8")
+        envelope=b"GAI1"+len(metadata).to_bytes(4,"big")+metadata+payload
+        return Response(envelope,media_type="application/vnd.getaddressinfo.result")
     handle=tempfile.NamedTemporaryFile(prefix="getaddressinfo-",suffix=".zip",delete=False)
     path=Path(handle.name)
     try:
@@ -101,4 +107,4 @@ async def process_workbook(request:Request,workbook:UploadFile=File(...),column:
         handle.close()
         path.unlink(missing_ok=True)
         raise
-    return FileResponse(path,filename=_timestamped_zip_name(Path(filename).stem,"results"),media_type="application/zip",background=BackgroundTask(path.unlink,missing_ok=True))
+    return FileResponse(path,filename=result_filename,media_type="application/zip",background=BackgroundTask(path.unlink,missing_ok=True))

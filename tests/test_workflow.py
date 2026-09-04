@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 import pytest
 import app as app_module
@@ -186,6 +187,11 @@ def test_fastapi_process_returns_result_zip_in_same_request():
             files={"workbook": ("input.xlsx", make_input(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
             data={"column": "Jobsite"},
         )
+        preview_response = client.post(
+            "/api/process",
+            files={"workbook": ("input.xlsx", make_input(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            data={"column": "Jobsite", "preview": "true"},
+        )
     finally:
         app_module.NYCPropertyClient = original_client
 
@@ -194,6 +200,14 @@ def test_fastapi_process_returns_result_zip_in_same_request():
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert "property_results.xlsx" in archive.namelist()
         assert "failed_co_downloads.csv" in archive.namelist()
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "application/vnd.getaddressinfo.result"
+    assert preview_response.content[:4] == b"GAI1"
+    metadata_length = int.from_bytes(preview_response.content[4:8], "big")
+    metadata = json.loads(preview_response.content[8:8 + metadata_length])
+    assert metadata["records"][0]["matched_address"] == "35 EUCLID AVENUE, Brooklyn, NY, 11208"
+    with zipfile.ZipFile(io.BytesIO(preview_response.content[8 + metadata_length:])) as archive:
+        assert "property_results.xlsx" in archive.namelist()
 
 def test_co_download_fields_are_the_last_two_workbook_rows():
     assert DETAIL_COLUMNS[-2:] == [
