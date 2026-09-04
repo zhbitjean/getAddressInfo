@@ -33,7 +33,7 @@ FastAPI Web App：同事通过浏览器上传含 Jobsite 列的 Excel，服务�
 部署完成后，gcloud 会显示一个 HTTPS run.app 地址。同事只需打开该地址。
 ## Git 开发与发布流程
 
-正式版本保存在 `main`。每次修改先建立临时 `feature/...` 分支，在 Dev Cloud Run 服务测试通过后再合并到 `main` 并部署 Production。完整的逐步命令和可选 `develop` 分支方案见 [GIT_WORKFLOW.md](GIT_WORKFLOW.md)。
+正式版本保存在 `main`。每次修改先建立临时 `feature/...` 分支，在 Dev Cloud Run 服务测试通过后再合并到 `main` 并部署 Production。完整的逐步命令和可选 `develop` 分支方案见 [GIT_WORKFLOW.md](GIT_WORKFLOW.md)。 推送后自动测试与部署由 `cloudbuild.yaml` 控制；一次性触发器设置使用 `setup_cloud_build.ps1`。
 
 ## 为什么查询保持在同一个请求中
 

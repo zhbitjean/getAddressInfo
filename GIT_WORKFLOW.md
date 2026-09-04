@@ -97,3 +97,20 @@ git push -u origin develop
 ```
 
 Then merge feature branches into `develop`, deploy `develop` to the Dev service, and merge `develop` into `main` only after testing. Do not run `git switch develop` until the branch has been created locally or fetched from GitHub.
+## Automatic deployment with Cloud Build
+
+The repository contains `cloudbuild.yaml` and `setup_cloud_build.ps1`. Cloud Build first runs the automated tests. Only a successful test run is allowed to build the image and deploy it.
+
+Branch mapping:
+
+- `develop` automatically deploys to `get-address-info-dev`.
+- `main` automatically deploys to `get-address-info-prod`.
+- Feature branches do not deploy automatically.
+
+After Google Cloud CLI login and the one-time GitHub connection, run:
+
+```powershell
+.\setup_cloud_build.ps1 -ProjectId "YOUR_PROJECT_ID"
+```
+
+The setup is idempotent: it creates the Artifact Registry repository, a dedicated Cloud Build deployment service account, and any missing triggers. Do not push directly to `main` until the Dev version has passed testing.
