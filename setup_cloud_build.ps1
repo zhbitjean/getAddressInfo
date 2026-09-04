@@ -3,7 +3,8 @@ param(
     [string]$ProjectId,
     [string]$Region = "us-east1",
     [string]$RepositoryOwner = "zhbitjean",
-    [string]$RepositoryName = "getAddressInfo",
+    [string]$GitHubRepository = "getAddressInfo",
+    [string]$RepositoryResourceName = "get-address-info",
     [string]$ConnectionName = "github"
 )
 
@@ -35,10 +36,10 @@ foreach ($role in $roles) {
     & $gcloud projects add-iam-policy-binding $ProjectId --member="serviceAccount:$buildAccount" --role=$role --quiet
 }
 
-$repositoryResource = "projects/$ProjectId/locations/$Region/connections/$ConnectionName/repositories/$RepositoryName"
-& $gcloud builds repositories describe $RepositoryName --connection=$ConnectionName --region=$Region *> $null
+$repositoryResource = "projects/$ProjectId/locations/$Region/connections/$ConnectionName/repositories/$RepositoryResourceName"
+& $gcloud builds repositories describe $RepositoryResourceName --connection=$ConnectionName --region=$Region *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "GitHub is not connected yet. Open Cloud Build > Repositories, create a GitHub connection named '$ConnectionName', and link $RepositoryOwner/$RepositoryName. Then run this script again."
+    Write-Host "GitHub is not connected yet. Open Cloud Build > Repositories, create a GitHub connection named '$ConnectionName', and link $RepositoryOwner/$GitHubRepository with repository ID '$RepositoryResourceName'. Then run this script again."
     exit 2
 }
 
