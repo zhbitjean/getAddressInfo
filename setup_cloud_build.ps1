@@ -33,7 +33,7 @@ $roles = @(
     "roles/logging.logWriter"
 )
 foreach ($role in $roles) {
-    & $gcloud projects add-iam-policy-binding $ProjectId --member="serviceAccount:$buildAccount" --role=$role --quiet
+    & $gcloud projects add-iam-policy-binding $ProjectId --member="serviceAccount:$buildAccount" --role=$role --condition=None --quiet
 }
 
 $repositoryResource = "projects/$ProjectId/locations/$Region/connections/$ConnectionName/repositories/$RepositoryResourceName"
