@@ -4,7 +4,7 @@ param(
     [string]$Region = "us-east1",
     [string]$RepositoryOwner = "zhbitjean",
     [string]$GitHubRepository = "getAddressInfo",
-    [string]$RepositoryResourceName = "get-address-info",
+    [string]$RepositoryResourceName = "zhbitjean-getAddressInfo",
     [string]$ConnectionName = "github"
 )
 
